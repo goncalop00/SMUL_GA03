@@ -16,10 +16,8 @@ print("Loading UrbanSound8K...")
 dataset = soundata.initialize('urbansound8k')
 dataset.download()
 dataset.validate()
+import pandas as pd
 
-# -----------------------------------------------------
-# 2. Build metadata table (since soundata has no .meta_path)
-# -----------------------------------------------------
 CLASS_MAP = {
     "air_conditioner": 0,
     "car_horn": 1,
@@ -33,18 +31,15 @@ CLASS_MAP = {
     "street_music": 9
 }
 
+# Build minimal metadata table
 rows = []
 
-print("Building metadata table...")
 for clip_id in dataset.clip_ids:
     clip = dataset.clip(clip_id)
     rows.append({
-        "clip_id": clip_id,
-        "slice_file_name": clip.audio_path.split("/")[-1],
+        "audio_path": clip.audio_path,
         "fold": clip.fold,
-        "class": clip.tags["class"],
-        "classID": CLASS_MAP[clip.tags["class"]],
-        "audio_path": clip.audio_path
+        "classID": CLASS_MAP[clip.tags["class"]]
     })
 
 meta = pd.DataFrame(rows)
