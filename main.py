@@ -36,13 +36,18 @@ rows = []
 
 for clip_id in dataset.clip_ids:
     clip = dataset.clip(clip_id)
+
+    filename = clip.audio_path.split("/")[-1]
+    class_id = int(filename.split("-")[1])   # second field in filename
+
     rows.append({
         "audio_path": clip.audio_path,
         "fold": clip.fold,
-        "classID": CLASS_MAP[clip.tags["class"]]
+        "classID": class_id
     })
 
 meta = pd.DataFrame(rows)
+
 
 
 # -----------------------------------------------------
