@@ -10,7 +10,7 @@ import time
 from tqdm import tqdm
 
 # -----------------------------------------------------
-# 1. Load Dataset using soundata
+# 1. Load Dataset using soundata    
 # -----------------------------------------------------
 print("Loading UrbanSound8K...")
 dataset = soundata.initialize('urbansound8k')
@@ -61,20 +61,33 @@ def load_audio(audio_path, sr=None):
 # -----------------------------------------------------
 # 4. Paper-based MFCC Feature Extraction (225 dims)
 # -----------------------------------------------------
-def extract_mfcc(audio, sr):
-    frame_length = int(0.0232 * sr)
-    hop_length = frame_length // 2
+def extract_mfcc(audio, sr, n_mfcc=40):
+    import numpy as np
+    import librosa
 
-    mfcc = librosa.feature.mfcc(
-        y=audio, sr=sr,
-        n_mfcc=25,
-        n_fft=frame_length,
-        hop_length=hop_length,
-        n_mels=40
-    )
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
 
-    delta = librosa.feature.delta(mfcc)
-    delta2 = librosa.feature.delta(mfcc, order=2)
+    # Ensure at least 9 frames for delta calculation
+    if mfcc.shape[1] < 9:
+        pad_amount = 9 - mfcc.shape[1]
+        mfcc = np.pad(mfcc, ((0, 0), (0, pad_amount)), mode='edge')
+
+    # Compute deltas with smaller width (safer)
+    delta = librosa.feature.delta(mfcc, width=3)
+    delta2 = librosa.feature.delta(mfcc, order=2, width=3)
+
+    # Aggregate to fixed size vector
+    feat = np.concatenate([
+        np.mean(mfcc, axis=1),
+        np.std(mfcc, axis=1),
+        np.mean(delta, axis=1),
+        np.std(delta, axis=1),
+        np.mean(delta2, axis=1),
+        np.std(delta2, axis=1),
+    ])
+
+    return feat
+
 
     # 5 summary stats for MFCCs
     def stats_5(matrix):
