@@ -14,6 +14,17 @@ import time
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+
+# -----------------------------------------------------
+# CONFIGURAÇÃO DE EXECUÇÃO
+# -----------------------------------------------------
+# Corre só um fold? True/False
+RUN_SINGLE_FOLD = False   # mudar para False para correr os 10 folds completos
+
+# Qual fold correr quando RUN_SINGLE_FOLD = True ?
+SINGLE_FOLD = 1          # valor entre 1 e 10
+
+
 # -----------------------------------------------------
 # 1. Load Dataset using soundata
 # -----------------------------------------------------
@@ -153,16 +164,21 @@ def evaluate(model, X_test, y_test):
     )
     return acc, precision, recall, f1, preds
 
-
 # -----------------------------------------------------
-# 8. FULL 10-FOLD EVALUATION COM CONFUSION MATRICES
+# 8. FULL 10-FOLD EVALUATION (AGORA COM OPÇÃO SINGLE FOLD)
 # -----------------------------------------------------
 all_fold_metrics = []   # [fold, acc, prec, rec, f1]
 conf_matrices = []      # uma confusion matrix por fold
 
 start_time = time.time()
 
-for fold in range(1, 11):
+# Escolher que folds correr
+if RUN_SINGLE_FOLD:
+    folds_to_run = [SINGLE_FOLD]
+else:
+    folds_to_run = range(1, 11)
+
+for fold in folds_to_run:
     print("\n==============================================")
     print(f"               TEST FOLD {fold}")
     print("==============================================")
@@ -181,6 +197,7 @@ for fold in range(1, 11):
     conf_matrices.append(cm)
 
 end_time = time.time()
+
 
 
 # -----------------------------------------------------
