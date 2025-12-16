@@ -5,8 +5,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_recall_fscore_support
 
 def tune_svm(X_train, y_train, X_val, y_val):
-    C_values = [1, 5, 10, 20, 50]
-    gamma_values = ["scale", "auto", 0.01, 0.1]
+    C_values = [1, 5]
+    gamma_values = ["scale", "auto"]
 
     best_f1 = -1
     best_model = None
