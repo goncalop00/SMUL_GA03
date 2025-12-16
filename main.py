@@ -1,408 +1,122 @@
-import soundata
-import librosa
+# main.py
+import os
+import time
 import numpy as np
 import pandas as pd
-from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
-from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-    confusion_matrix,
+from sklearn.metrics import confusion_matrix
+
+from config import (
+    CONFIG,
+    RUN_SINGLE_FOLD,
+    SINGLE_FOLD,
+    TUNE,
+    print_experiment_config
 )
-import time
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 
+from data import (
+    load_dataset,
+    build_metadata,
+    build_fold_dataset
+)
 
-##proximos passos:
-'''- experimentar RandomForest (feito)
- data augmentation (time stretch, pitch shift, noise) (to do)
- fazer tuning dos hyperparâmetros do SVM e RF (grid search) (done)
- experimentar outros tipos de features (Chroma, MelSpec, etc) (to do)
-'''
-# -----------------------------------------------------
-# CONFIGURAÇÃO DE EXECUÇÃO
-# -----------------------------------------------------
-RUN_SINGLE_FOLD = False   # True para correr só um fold (debug)
-SINGLE_FOLD = 1           # valor entre 1 e 10 quando RUN_SINGLE_FOLD = True
-TUNE = True               # True para fazer hyperparameter tuning
+from features import extract_mfcc
 
+from svm_model import tune_svm
+from rf_model import tune_rf
 
-# =====================================================
-# GLOBAL EXPERIMENT CONFIG
-# =====================================================
-CONFIG = {
-    "EXECUTION": {
-        "RUN_SINGLE_FOLD": RUN_SINGLE_FOLD,
-        "SINGLE_FOLD": SINGLE_FOLD if RUN_SINGLE_FOLD else "ALL (1–10)",
-        "TUNE": TUNE,
-    },
-    "FEATURES": {
-        "type": "MFCC",
-        "n_mfcc": 40,
-        "n_fft": 2048,
-        "hop_length": 512,
-        "n_mels": 90,
-        "fmax_ratio": 0.5,
-        "stats": ["mean", "std"],
-        "delta": True,
-        "delta_delta": True,
-    },
-    "MODELS": {
-        "SVM": {
-            "kernel": "rbf",
-            "tuned": TUNE,
-            "tuned_params": ["C", "gamma"] if TUNE else None,
-            "fixed_params": None if TUNE else {"C": 10, "gamma": "scale"},
-        },
-        "RandomForest": {
-            "tuned": TUNE,
-            "tuned_params": ["n_estimators", "max_depth", "min_samples_split"] if TUNE else None,
-            "fixed_params": None if TUNE else {"n_estimators": 100},
-        },
-    },
-    "DATASET": {
-        "name": "UrbanSound8K",
-        "num_classes": 10,
-        "evaluation": "Official 10-fold cross-validation",
-    },
-    "METRICS": {
-        "primary": "macro-F1",
-        "secondary": ["accuracy", "precision", "recall"],
-    },
-}
+from evaluation import evaluate
+from plotting import plot_confusion_matrix, plot_model_comparison
 
 
 
 # -----------------------------------------------------
-# 1. Load Dataset using soundata
+# Setup
 # -----------------------------------------------------
-print("Loading UrbanSound8K...")
-dataset = soundata.initialize('urbansound8k')
-# dataset.download()   # uncomment if you need to download the dataset 
-dataset.validate()
-
-CLASS_MAP = {
-    "air_conditioner": 0,
-    "car_horn": 1,
-    "children_playing": 2,
-    "dog_bark": 3,
-    "drilling": 4,
-    "engine_idling": 5,
-    "gun_shot": 6,
-    "jackhammer": 7,
-    "siren": 8,
-    "street_music": 9
-}
-
-rows = []
-for clip_id in dataset.clip_ids:
-    clip = dataset.clip(clip_id)
-    filename = clip.audio_path.split("/")[-1]
-    class_id = int(filename.split("-")[1])   # second field in filename
-    rows.append({
-        "audio_path": clip.audio_path,
-        "fold": clip.fold,
-        "classID": class_id
-    })
-meta = pd.DataFrame(rows)
-
-# -----------------------------------------------------
-# 3. Utility function to load audio
-# -----------------------------------------------------
-def load_audio(audio_path, sr=None):
-    audio, sr = librosa.load(audio_path, sr=sr)  # sr=None keeps original rate
-    return audio, sr
-
-# -----------------------------------------------------
-# 4. MFCC Feature Extraction (fixed-size vector)
-# -----------------------------------------------------
-def extract_mfcc(audio, sr):
-    cfg = CONFIG["FEATURES"]
-
-    mfcc = librosa.feature.mfcc(
-        y=audio,
-        sr=sr,
-        n_mfcc=cfg["n_mfcc"],
-        n_fft=cfg["n_fft"],
-        hop_length=cfg["hop_length"],
-        n_mels=cfg["n_mels"],
-        fmax=sr * cfg["fmax_ratio"]
-    )   
-
-    
-    # 2) Alguns clips são muito curtos → poucos "frames" temporais.
-    #    A função delta precisa de pelo menos 9 frames.
-    #    Se houver menos, fazemos padding repetindo a última coluna.
-
-    # Garantir frames suficientes para delta
-    if mfcc.shape[1] < 9:
-        pad_amount = 9 - mfcc.shape[1]
-        mfcc = np.pad(mfcc, ((0, 0), (0, pad_amount)), mode='edge')
-
-    # 3) Delta MFCC (1ª derivada no tempo)
-    #    Mede a variação dos MFCCs → captura dinâmica/movimento do som.
-
-    delta = librosa.feature.delta(mfcc, width=3)
-
-    # 4) Delta-Delta MFCC (2ª derivada no tempo)
-    #    Mede a "aceleração" da variação dos MFCCs → útil para sons com ataques rápidos.
-    delta2 = librosa.feature.delta(mfcc, order=2, width=3)
-
-    feat = np.concatenate([
-        np.mean(mfcc, axis=1),
-        np.std(mfcc, axis=1),
-        np.mean(delta, axis=1),
-        np.std(delta, axis=1),
-        np.mean(delta2, axis=1),
-        np.std(delta2, axis=1),
-    ])
-
-    return feat
-
-# -----------------------------------------------------
-# 5. Build dataset for a given test fold
-# -----------------------------------------------------
-def build_fold_dataset(test_fold):
-    print(f"\nBuilding dataset for fold {test_fold}...")
-
-    train_rows = meta[meta["fold"] != test_fold]
-    test_rows  = meta[meta["fold"] == test_fold]
-
-    X_train, y_train = [], []
-    X_test,  y_test  = [], []
-
-    # Training set
-    for _, row in tqdm(train_rows.iterrows(), total=len(train_rows), desc="Training data"):
-        audio, sr = load_audio(row.audio_path, sr=None)
-        feat = extract_mfcc(audio, sr)
-        X_train.append(feat)
-        y_train.append(row.classID)
-
-    # Test set
-    for _, row in tqdm(test_rows.iterrows(), total=len(test_rows), desc="Test data"):
-        audio, sr = load_audio(row.audio_path, sr=None)
-        feat = extract_mfcc(audio, sr)
-        X_test.append(feat)
-        y_test.append(row.classID)
-
-    return (
-        np.array(X_train), np.array(y_train),
-        np.array(X_test),  np.array(y_test)
-    )
-
-svm_params_per_fold = []
-rf_params_per_fold = []
-
-#############################################################
-# HYPERPARAMETER TUNING FOR SVM (NOVA FUNÇÃO)
-#############################################################
-def tune_svm(X_train, y_train, X_test, y_test):
-    """
-    Faz grid search simples sobre C e gamma para SVM (kernel RBF),
-    escolhendo o modelo com melhor F1 (macro) no conjunto de validação (aqui: X_test, y_test).
-    """
-
-    C_values = [1, 5, 10, 20, 50]
-    gamma_values = ["scale", "auto", 0.01, 0.1]
-
-    best_f1 = -1.0
-    best_model = None
-    best_params = None
-
-    for C in C_values:
-        for gamma in gamma_values:
-
-            model = make_pipeline(
-                StandardScaler(),
-                SVC(kernel="rbf", C=C, gamma=gamma)
-            )
-
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-
-            # precision_recall_fscore_support devolve (precision, recall, f1, support)
-            # aqui só nos interessa o f1 (índice 2)
-            f1 = precision_recall_fscore_support(
-                y_test, preds, average="macro", zero_division=0
-            )[2]
-
-            if f1 > best_f1:
-                best_f1 = f1
-                best_model = model
-                best_params = (C, gamma)
-
-    print(f"[SVM TUNING] Best params: C={best_params[0]}, gamma={best_params[1]}, F1={best_f1:.3f}")
-    return best_model, best_params
-
-
-
-################################################################
-# HYPERPARAMETER TUNING FOR RANDOM FOREST (NOVA FUNÇÃO)
-#############################################################
-def tune_rf(X_train, y_train, X_test, y_test):
-    """
-    Faz grid search simples para RandomForest,
-    escolhendo o modelo com melhor F1 (macro) no conjunto de validação (X_test, y_test).
-    """
-
-    n_estimators_list = [100, 300, 500]
-    max_depth_list = [None, 20, 40]
-    min_samples_split_list = [2, 5]
-
-    best_f1 = -1.0
-    best_model = None
-    best_params = None
-
-    for n in n_estimators_list:
-        for max_d in max_depth_list:
-            for min_split in min_samples_split_list:
-
-                model = RandomForestClassifier(
-                    n_estimators=n,
-                    max_depth=max_d,
-                    min_samples_split=min_split,
-                    n_jobs=-1,
-                    random_state=42
-                )
-
-                model.fit(X_train, y_train)
-                preds = model.predict(X_test)
-
-                # outra vez, só usamos o F1 (macro)
-                f1 = precision_recall_fscore_support(
-                    y_test, preds, average="macro", zero_division=0
-                )[2]
-
-                if f1 > best_f1:
-                    best_f1 = f1
-                    best_model = model
-                    best_params = (n, max_d, min_split)
-
-    print(f"[RF TUNING] Best params: n_estimators={best_params[0]}, max_depth={best_params[1]}, "
-          f"min_samples_split={best_params[2]}, F1={best_f1:.3f}")
-    return best_model, best_params
-
-# -----------------------------------------------------
-# 6. Train SVM Model
-# -----------------------------------------------------
-def train_svm(X_train, y_train):
-    model = make_pipeline(
-        StandardScaler(),
-        SVC(kernel='rbf', C=10, gamma='scale', probability=False)
-    )
-    model.fit(X_train, y_train)
-    return model
-
-# -----------------------------------------------------
-# 6b. Train Random Forest (nova função)
-# -----------------------------------------------------
-def train_random_forest(X_train, y_train, n_estimators=100):
-    # RandomForest não necessita de StandardScaler; mantemos features originais
-    model = RandomForestClassifier(
-        n_estimators=n_estimators,
-        random_state=42,
-        n_jobs=-1
-    )
-    model.fit(X_train, y_train)
-    return model
-
-# -----------------------------------------------------
-# 7. Evaluate Model (agora também devolve preds)
-# -----------------------------------------------------
-def evaluate(model, X_test, y_test):
-    start_pred = time.time()
-    preds = model.predict(X_test)
-    end_pred = time.time()
-    pred_time = end_pred - start_pred
-
-    acc = accuracy_score(y_test, preds)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y_test, preds, average='macro', zero_division=0
-    )
-    return acc, precision, recall, f1, preds, pred_time
-
-
-def print_experiment_config(config):
-    print("\n" + "=" * 70)
-    print("EXPERIMENT CONFIGURATION (AUTO-GENERATED)")
-    print("=" * 70)
-
-    print("\n[EXECUTION]")
-    for k, v in config["EXECUTION"].items():
-        print(f"{k:25}: {v}")
-
-    print("\n[FEATURE EXTRACTION]")
-    for k, v in config["FEATURES"].items():
-        print(f"{k:25}: {v}")
-
-    print("\n[MODELS]")
-    for model, params in config["MODELS"].items():
-        print(f"\n{model}")
-        for k, v in params.items():
-            print(f"  {k:22}: {v}")
-
-    print("\n[DATASET]")
-    for k, v in config["DATASET"].items():
-        print(f"{k:25}: {v}")
-
-    print("\n[EVALUATION METRICS]")
-    for k, v in config["METRICS"].items():
-        print(f"{k:25}: {v}")
-
-    print("=" * 70 + "\n")
-
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 print_experiment_config(CONFIG)
 
 # -----------------------------------------------------
-# 8. FULL 10-FOLD EVALUATION 
+# Load dataset and metadata
+# -----------------------------------------------------
+print("Loading UrbanSound8K...")
+dataset = load_dataset()
+meta = build_metadata(dataset)
+
+# -----------------------------------------------------
+# Folds to run
 # -----------------------------------------------------
 if RUN_SINGLE_FOLD:
     folds_to_run = [SINGLE_FOLD]
 else:
     folds_to_run = range(1, 11)
 
-# Definir modelos a testar
-model_constructors = {
-    "SVM": train_svm,
-    "RandomForest": train_random_forest
-}
+# -----------------------------------------------------
+# Class names (for confusion matrices)
+# -----------------------------------------------------
+CLASS_NAMES = [
+    "air_cond", "car_horn", "children", "dog_bark", "drilling",
+    "engine", "gun_shot", "jackhammer", "siren", "street_music"
+]
 
-# Estruturas para guardar resultados por modelo
+# -----------------------------------------------------
+# Storage
+# -----------------------------------------------------
 all_results = {}
+svm_params_per_fold = []
+rf_params_per_fold = []
+
 total_start = time.time()
 
-for model_name, train_fn in model_constructors.items():
+# -----------------------------------------------------
+# Run experiments
+# -----------------------------------------------------
+for model_name in ["SVM", "RandomForest"]:
+
     print("\n==============================================")
     print(f"        MODEL: {model_name}")
     print("==============================================")
-    fold_metrics = []   # [fold, acc, prec, rec, f1, train_time, pred_time]
+
+    fold_metrics = []
     conf_matrices = []
+
     for fold in folds_to_run:
         print("\n----------------------------------------------")
         print(f"               TEST FOLD {fold} - {model_name}")
         print("----------------------------------------------")
 
-        X_train, y_train, X_test, y_test = build_fold_dataset(fold)
+        X_train, y_train, X_test, y_test = build_fold_dataset(
+            meta,
+            extract_mfcc,
+            fold
+        )
 
+        # -------------------------
+        # Train / Tune
+        # -------------------------
         t0 = time.time()
+
         if model_name == "SVM":
             if TUNE:
-                model, best_params = tune_svm(X_train, y_train, X_test, y_test)
+                model, best_params = tune_svm(
+                    X_train, y_train,
+                    X_test, y_test
+                )
                 svm_params_per_fold.append({
                     "fold": fold,
                     "C": best_params[0],
                     "gamma": best_params[1]
                 })
             else:
-                model = train_svm(X_train, y_train)
+                raise NotImplementedError("Non-tuned SVM not implemented in modular version.")
 
         elif model_name == "RandomForest":
             if TUNE:
-                model, best_params = tune_rf(X_train, y_train, X_test, y_test)
+                model, best_params = tune_rf(
+                    X_train, y_train,
+                    X_test, y_test
+                )
                 rf_params_per_fold.append({
                     "fold": fold,
                     "n_estimators": best_params[0],
@@ -410,124 +124,119 @@ for model_name, train_fn in model_constructors.items():
                     "min_samples_split": best_params[2]
                 })
             else:
-                model = train_random_forest(X_train, y_train)
+                raise NotImplementedError("Non-tuned RF not implemented in modular version.")
 
-        t1 = time.time()
-        train_time = t1 - t0
+        train_time = time.time() - t0
 
+        # -------------------------
+        # Evaluation
+        # -------------------------
+        acc, prec, rec, f1, preds, pred_time = evaluate(
+            model,
+            X_test,
+            y_test
+        )
 
-        acc, prec, rec, f1, preds, pred_time = evaluate(model, X_test, y_test)
+        print(
+            f"{model_name} Fold {fold} → "
+            f"Accuracy: {acc:.3f}, "
+            f"F1: {f1:.3f}, "
+            f"train_time: {train_time:.1f}s, "
+            f"pred_time: {pred_time:.2f}s"
+        )
 
-        print(f"{model_name} Fold {fold} → Accuracy: {acc:.3f}, F1: {f1:.3f}, train_time: {train_time:.1f}s, pred_time: {pred_time:.2f}s")
+        fold_metrics.append([
+            fold, acc, prec, rec, f1, train_time, pred_time
+        ])
 
-        fold_metrics.append([fold, acc, prec, rec, f1, train_time, pred_time])
-        cm = confusion_matrix(y_test, preds, labels=list(range(10)))
+        cm = confusion_matrix(
+            y_test,
+            preds,
+            labels=list(range(10))
+        )
         conf_matrices.append(cm)
 
-    # guardar resultados deste modelo
+    # -------------------------------------------------
+    # Aggregate results for this model
+    # -------------------------------------------------
     df_metrics = pd.DataFrame(
         fold_metrics,
-        columns=["Fold", "Accuracy", "Precision", "Recall", "F1", "TrainTime_s", "PredTime_s"]
+        columns=[
+            "Fold", "Accuracy", "Precision",
+            "Recall", "F1",
+            "TrainTime_s", "PredTime_s"
+        ]
     )
 
-    mean_acc  = df_metrics["Accuracy"].mean()
-    mean_prec = df_metrics["Precision"].mean()
-    mean_rec  = df_metrics["Recall"].mean()
-    mean_f1   = df_metrics["F1"].mean()
-    mean_train_time = df_metrics["TrainTime_s"].mean()
-    mean_pred_time  = df_metrics["PredTime_s"].mean()
     mean_cm = np.mean(conf_matrices, axis=0)
 
     all_results[model_name] = {
         "df_metrics": df_metrics,
-        "mean_acc": mean_acc,
-        "mean_prec": mean_prec,
-        "mean_rec": mean_rec,
-        "mean_f1": mean_f1,
-        "mean_train_time": mean_train_time,
-        "mean_pred_time": mean_pred_time,
         "mean_confusion": mean_cm
     }
 
-    if TUNE:
-        df_svm_params = pd.DataFrame(svm_params_per_fold)
-        df_rf_params = pd.DataFrame(rf_params_per_fold)
+    # -------------------------------------------------
+    # Save results
+    # -------------------------------------------------
+    df_metrics.to_csv(
+        f"{RESULTS_DIR}/fold_metrics_{model_name}.csv",
+        index=False
+    )
 
-        df_svm_params.to_csv("svm_best_params_per_fold.csv", index=False)
-        df_rf_params.to_csv("rf_best_params_per_fold.csv", index=False)
+    np.savetxt(
+        f"{RESULTS_DIR}/mean_confusion_matrix_{model_name}.csv",
+        mean_cm,
+        delimiter=","
+    )
 
-        print("\nSaved hyperparameters per fold:")
-        print(" - svm_best_params_per_fold.csv")
-        print(" - rf_best_params_per_fold.csv")
-    # salvar resultados do modelo
-    df_metrics.to_csv(f"fold_metrics_{model_name}.csv", index=False)
-    np.savetxt(f"mean_confusion_matrix_{model_name}.csv", mean_cm, delimiter=",")
-    print(f"\nSaved metrics for {model_name} to 'fold_metrics_{model_name}.csv' and 'mean_confusion_matrix_{model_name}.csv'.")
-
-total_end = time.time()
-print(f"\nTotal elapsed time for all experiments: {total_end - total_start:.1f} seconds")
+    plot_confusion_matrix(
+        mean_cm,
+        CLASS_NAMES,
+        title=f"Mean Confusion Matrix ({model_name})",
+        save_path=f"{RESULTS_DIR}/mean_confusion_matrix_{model_name}.png"
+    )
 
 # -----------------------------------------------------
-# 9. Mostrar comparação resumida
+# Save hyperparameters per fold
 # -----------------------------------------------------
-print("\n================ COMPARISON SUMMARY ================")
+if TUNE:
+    if svm_params_per_fold:
+        pd.DataFrame(svm_params_per_fold).to_csv(
+            f"{RESULTS_DIR}/svm_best_params_per_fold.csv",
+            index=False
+        )
+    if rf_params_per_fold:
+        pd.DataFrame(rf_params_per_fold).to_csv(
+            f"{RESULTS_DIR}/rf_best_params_per_fold.csv",
+            index=False
+        )
+
+# -----------------------------------------------------
+# Summary comparison
+# -----------------------------------------------------
 summary_rows = []
-for name, res in all_results.items():
-    print(f"\nModel: {name}")
-    print(f" Mean Accuracy : {res['mean_acc']:.3f}")
-    print(f" Mean Precision: {res['mean_prec']:.3f}")
-    print(f" Mean Recall   : {res['mean_rec']:.3f}")
-    print(f" Mean F1-score : {res['mean_f1']:.3f}")
-    print(f" Mean Train Time (s): {res['mean_train_time']:.2f}")
-    print(f" Mean Pred Time  (s): {res['mean_pred_time']:.4f}")
-
+for model_name, res in all_results.items():
+    df = res["df_metrics"]
     summary_rows.append({
-        "Model": name,
-        "MeanAcc": res['mean_acc'],
-        "MeanF1": res['mean_f1'],
-        "MeanTrain_s": res['mean_train_time'],
-        "MeanPred_s": res['mean_pred_time']
+        "Model": model_name,
+        "MeanAcc": df["Accuracy"].mean(),
+        "MeanF1": df["F1"].mean(),
+        "MeanTrain_s": df["TrainTime_s"].mean(),
+        "MeanPred_s": df["PredTime_s"].mean(),
     })
 
 df_summary = pd.DataFrame(summary_rows)
-df_summary.to_csv("comparison_summary.csv", index=False)
-print("\nSaved comparison summary to 'comparison_summary.csv'.")
+df_summary.to_csv(
+    f"{RESULTS_DIR}/comparison_summary.csv",
+    index=False
+)
 
-# -----------------------------------------------------
-# 10. Plots de comparação (Acc & F1)
-# -----------------------------------------------------
-plt.figure(figsize=(6,4))
-x = np.arange(len(df_summary))
-plt.bar(x - 0.15, df_summary["MeanAcc"], width=0.3, label="Mean Accuracy")
-plt.bar(x + 0.15, df_summary["MeanF1"], width=0.3, label="Mean F1")
-plt.xticks(x, df_summary["Model"])
-plt.ylabel("Score")
-plt.title("Comparison: Mean Accuracy and Mean F1")
-plt.legend()
-plt.tight_layout()
-plt.savefig("comparison_acc_f1.png")
-plt.show()
+plot_model_comparison(
+    df_summary,
+    save_path=f"{RESULTS_DIR}/comparison_acc_f1.png"
+)
 
-# -----------------------------------------------------
-# 11. Plotagem das matrizes de confusão médias (uma por modelo)
-# -----------------------------------------------------
-for name, res in all_results.items():
-    mean_cm = res["mean_confusion"]
-    plt.figure(figsize=(8,6))
-    plt.imshow(mean_cm, interpolation='nearest', cmap='Blues')
-    plt.title(f"Mean Confusion Matrix ({name})")
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
-    plt.colorbar()
-    tick_marks = np.arange(10)
-    class_names = [
-        "air_cond", "car_horn", "children", "dog_bark", "drilling",
-        "engine", "gun_shot", "jackhammer", "siren", "street_music"
-    ]
-    plt.xticks(tick_marks, class_names, rotation=45, ha="right")
-    plt.yticks(tick_marks, class_names)
-    plt.tight_layout()
-    plt.savefig(f"mean_confusion_matrix_{name}.png")
-    plt.show()
-
-print("\nDone.")
+total_end = time.time()
+print("\n==============================================")
+print(f"Total elapsed time: {total_end - total_start:.1f} seconds")
+print("Done.")
