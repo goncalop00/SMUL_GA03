@@ -1,0 +1,20 @@
+## pip install -r requirements.txt
+
+# Core
+numpy
+scipy
+pandas
+
+# Audio processing
+librosa
+soundata
+soundfile
+
+# Machine Learning
+scikit-learn
+
+# Utilities
+tqdm
+
+# Plotting
+matplotlib
