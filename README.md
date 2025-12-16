@@ -80,16 +80,17 @@ All experimental outputs are saved in the `results/` folder:
 ## How to Run
 
 1. Create and activate a virtual environment:
+
    ```bash
    python -m venv venv
    source venv/bin/activate   # Linux / macOS
-Install dependencies:
 
-bash
-Copy code
-pip install -r requirements.txt
-Run the experiment:
+2. Install dependencies:
 
-bash
-Copy code
-python main.py
+   ```bash
+   pip install -r requirements.txt
+
+4. Run:
+
+   ```bash
+   python main.py
