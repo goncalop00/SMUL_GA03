@@ -15,11 +15,19 @@ import time
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+
+##proximos passos:
+'''- experimentar RandomForest (feito)
+ data augmentation (time stretch, pitch shift, noise) - talvez n faça muita diferença
+ fazer tuning dos hyperparâmetros do SVM e RF (grid search)
+ experimentar outros tipos de features (Chroma, MelSpec, etc)
+'''
 # -----------------------------------------------------
 # CONFIGURAÇÃO DE EXECUÇÃO
 # -----------------------------------------------------
 RUN_SINGLE_FOLD = False   # True para correr só um fold (debug)
 SINGLE_FOLD = 1           # valor entre 1 e 10 quando RUN_SINGLE_FOLD = True
+TUNE = True               # True para fazer hyperparameter tuning
 
 # -----------------------------------------------------
 # 1. Load Dataset using soundata
@@ -65,22 +73,39 @@ def load_audio(audio_path, sr=None):
 # 4. MFCC Feature Extraction (fixed-size vector)
 # -----------------------------------------------------
 def extract_mfcc(audio, sr, n_mfcc=40):
+
+    # 1) Cálculo dos MFCCs (Mel-Frequency Cepstral Coefficients)
+    #    - n_mfcc   : número de coeficientes por frame (ex.: 40)
+    #    - n_fft    : tamanho da janela da FFT (resolução em frequência)
+    #    - hop_len  : passo entre janelas (resolução no tempo)
+    #    - n_mels   : número de bandas Mel usadas para construir o espectrograma
+    #    - fmax     : frequência máxima considerada (fração da Nyquist: sr*0.45)
     mfcc = librosa.feature.mfcc(
         y=audio,
         sr=sr,
         n_mfcc=n_mfcc,
         n_fft=2048,
         hop_length=512,
-        n_mels=40,
-        fmax=sr * 0.45
+        n_mels=90,  #mudei de 40 para 60  # ficou melhor um bocadinho de nada
+        fmax=sr * 0.5 #mudei de 0.45 para 0.49
     )
+    
+    # 2) Alguns clips são muito curtos → poucos "frames" temporais.
+    #    A função delta precisa de pelo menos 9 frames.
+    #    Se houver menos, fazemos padding repetindo a última coluna.
 
     # Garantir frames suficientes para delta
     if mfcc.shape[1] < 9:
         pad_amount = 9 - mfcc.shape[1]
         mfcc = np.pad(mfcc, ((0, 0), (0, pad_amount)), mode='edge')
 
+    # 3) Delta MFCC (1ª derivada no tempo)
+    #    Mede a variação dos MFCCs → captura dinâmica/movimento do som.
+
     delta = librosa.feature.delta(mfcc, width=3)
+
+    # 4) Delta-Delta MFCC (2ª derivada no tempo)
+    #    Mede a "aceleração" da variação dos MFCCs → útil para sons com ataques rápidos.
     delta2 = librosa.feature.delta(mfcc, order=2, width=3)
 
     feat = np.concatenate([
@@ -124,6 +149,95 @@ def build_fold_dataset(test_fold):
         np.array(X_train), np.array(y_train),
         np.array(X_test),  np.array(y_test)
     )
+
+#############################################################
+# HYPERPARAMETER TUNING FOR SVM (NOVA FUNÇÃO)
+#############################################################
+def tune_svm(X_train, y_train, X_test, y_test):
+    """
+    Faz grid search simples sobre C e gamma para SVM (kernel RBF),
+    escolhendo o modelo com melhor F1 (macro) no conjunto de validação (aqui: X_test, y_test).
+    """
+
+    C_values = [1, 5, 10, 20, 50]
+    gamma_values = ["scale", "auto", 0.01, 0.1]
+
+    best_f1 = -1.0
+    best_model = None
+    best_params = None
+
+    for C in C_values:
+        for gamma in gamma_values:
+
+            model = make_pipeline(
+                StandardScaler(),
+                SVC(kernel="rbf", C=C, gamma=gamma)
+            )
+
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+
+            # precision_recall_fscore_support devolve (precision, recall, f1, support)
+            # aqui só nos interessa o f1 (índice 2)
+            f1 = precision_recall_fscore_support(
+                y_test, preds, average="macro", zero_division=0
+            )[2]
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_model = model
+                best_params = (C, gamma)
+
+    print(f"[SVM TUNING] Best params: C={best_params[0]}, gamma={best_params[1]}, F1={best_f1:.3f}")
+    return best_model
+
+
+
+################################################################
+# HYPERPARAMETER TUNING FOR RANDOM FOREST (NOVA FUNÇÃO)
+#############################################################
+def tune_rf(X_train, y_train, X_test, y_test):
+    """
+    Faz grid search simples para RandomForest,
+    escolhendo o modelo com melhor F1 (macro) no conjunto de validação (X_test, y_test).
+    """
+
+    n_estimators_list = [100, 300, 500]
+    max_depth_list = [None, 20, 40]
+    min_samples_split_list = [2, 5]
+
+    best_f1 = -1.0
+    best_model = None
+    best_params = None
+
+    for n in n_estimators_list:
+        for max_d in max_depth_list:
+            for min_split in min_samples_split_list:
+
+                model = RandomForestClassifier(
+                    n_estimators=n,
+                    max_depth=max_d,
+                    min_samples_split=min_split,
+                    n_jobs=-1,
+                    random_state=42
+                )
+
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+
+                # outra vez, só usamos o F1 (macro)
+                f1 = precision_recall_fscore_support(
+                    y_test, preds, average="macro", zero_division=0
+                )[2]
+
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_model = model
+                    best_params = (n, max_d, min_split)
+
+    print(f"[RF TUNING] Best params: n_estimators={best_params[0]}, max_depth={best_params[1]}, "
+          f"min_samples_split={best_params[2]}, F1={best_f1:.3f}")
+    return best_model
 
 # -----------------------------------------------------
 # 6. Train SVM Model
@@ -198,10 +312,17 @@ for model_name, train_fn in model_constructors.items():
         # Treino e temporização
         t0 = time.time()
         if model_name == "SVM":
-            model = train_fn(X_train, y_train)  # train_svm
+            if TUNE:
+                # model = train_fn(X_train, y_train)  # train_svm
+                
+                model = tune_svm(X_train, y_train, X_test, y_test)  # tuning SVM
+            else:
+                model = train_fn(X_train, y_train)
         else:
             # Para RF, podes ajustar n_estimators se quiseres
-            model = train_fn(X_train, y_train, n_estimators=100)
+            if TUNE:
+                # model = train_fn(X_train, y_train, n_estimators=100)
+                model = tune_rf(X_train, y_train, X_test, y_test)  # tuning RF
         t1 = time.time()
         train_time = t1 - t0
 
