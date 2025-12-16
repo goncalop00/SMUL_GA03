@@ -18,9 +18,9 @@ import matplotlib.pyplot as plt
 
 ##proximos passos:
 '''- experimentar RandomForest (feito)
- data augmentation (time stretch, pitch shift, noise) - talvez n faça muita diferença
- fazer tuning dos hyperparâmetros do SVM e RF (grid search)
- experimentar outros tipos de features (Chroma, MelSpec, etc)
+ data augmentation (time stretch, pitch shift, noise) (to do)
+ fazer tuning dos hyperparâmetros do SVM e RF (grid search) (done)
+ experimentar outros tipos de features (Chroma, MelSpec, etc) (to do)
 '''
 # -----------------------------------------------------
 # CONFIGURAÇÃO DE EXECUÇÃO
@@ -28,6 +28,53 @@ import matplotlib.pyplot as plt
 RUN_SINGLE_FOLD = False   # True para correr só um fold (debug)
 SINGLE_FOLD = 1           # valor entre 1 e 10 quando RUN_SINGLE_FOLD = True
 TUNE = True               # True para fazer hyperparameter tuning
+
+
+# =====================================================
+# GLOBAL EXPERIMENT CONFIG
+# =====================================================
+CONFIG = {
+    "EXECUTION": {
+        "RUN_SINGLE_FOLD": RUN_SINGLE_FOLD,
+        "SINGLE_FOLD": SINGLE_FOLD if RUN_SINGLE_FOLD else "ALL (1–10)",
+        "TUNE": TUNE,
+    },
+    "FEATURES": {
+        "type": "MFCC",
+        "n_mfcc": 40,
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 90,
+        "fmax_ratio": 0.5,
+        "stats": ["mean", "std"],
+        "delta": True,
+        "delta_delta": True,
+    },
+    "MODELS": {
+        "SVM": {
+            "kernel": "rbf",
+            "tuned": TUNE,
+            "tuned_params": ["C", "gamma"] if TUNE else None,
+            "fixed_params": None if TUNE else {"C": 10, "gamma": "scale"},
+        },
+        "RandomForest": {
+            "tuned": TUNE,
+            "tuned_params": ["n_estimators", "max_depth", "min_samples_split"] if TUNE else None,
+            "fixed_params": None if TUNE else {"n_estimators": 100},
+        },
+    },
+    "DATASET": {
+        "name": "UrbanSound8K",
+        "num_classes": 10,
+        "evaluation": "Official 10-fold cross-validation",
+    },
+    "METRICS": {
+        "primary": "macro-F1",
+        "secondary": ["accuracy", "precision", "recall"],
+    },
+}
+
+
 
 # -----------------------------------------------------
 # 1. Load Dataset using soundata
@@ -72,23 +119,19 @@ def load_audio(audio_path, sr=None):
 # -----------------------------------------------------
 # 4. MFCC Feature Extraction (fixed-size vector)
 # -----------------------------------------------------
-def extract_mfcc(audio, sr, n_mfcc=40):
+def extract_mfcc(audio, sr):
+    cfg = CONFIG["FEATURES"]
 
-    # 1) Cálculo dos MFCCs (Mel-Frequency Cepstral Coefficients)
-    #    - n_mfcc   : número de coeficientes por frame (ex.: 40)
-    #    - n_fft    : tamanho da janela da FFT (resolução em frequência)
-    #    - hop_len  : passo entre janelas (resolução no tempo)
-    #    - n_mels   : número de bandas Mel usadas para construir o espectrograma
-    #    - fmax     : frequência máxima considerada (fração da Nyquist: sr*0.45)
     mfcc = librosa.feature.mfcc(
         y=audio,
         sr=sr,
-        n_mfcc=n_mfcc,
-        n_fft=2048,
-        hop_length=512,
-        n_mels=90,  #mudei de 40 para 60  # ficou melhor um bocadinho de nada
-        fmax=sr * 0.5 #mudei de 0.45 para 0.49
-    )
+        n_mfcc=cfg["n_mfcc"],
+        n_fft=cfg["n_fft"],
+        hop_length=cfg["hop_length"],
+        n_mels=cfg["n_mels"],
+        fmax=sr * cfg["fmax_ratio"]
+    )   
+
     
     # 2) Alguns clips são muito curtos → poucos "frames" temporais.
     #    A função delta precisa de pelo menos 9 frames.
@@ -150,6 +193,9 @@ def build_fold_dataset(test_fold):
         np.array(X_test),  np.array(y_test)
     )
 
+svm_params_per_fold = []
+rf_params_per_fold = []
+
 #############################################################
 # HYPERPARAMETER TUNING FOR SVM (NOVA FUNÇÃO)
 #############################################################
@@ -189,7 +235,7 @@ def tune_svm(X_train, y_train, X_test, y_test):
                 best_params = (C, gamma)
 
     print(f"[SVM TUNING] Best params: C={best_params[0]}, gamma={best_params[1]}, F1={best_f1:.3f}")
-    return best_model
+    return best_model, best_params
 
 
 
@@ -237,7 +283,7 @@ def tune_rf(X_train, y_train, X_test, y_test):
 
     print(f"[RF TUNING] Best params: n_estimators={best_params[0]}, max_depth={best_params[1]}, "
           f"min_samples_split={best_params[2]}, F1={best_f1:.3f}")
-    return best_model
+    return best_model, best_params
 
 # -----------------------------------------------------
 # 6. Train SVM Model
@@ -278,8 +324,41 @@ def evaluate(model, X_test, y_test):
     )
     return acc, precision, recall, f1, preds, pred_time
 
+
+def print_experiment_config(config):
+    print("\n" + "=" * 70)
+    print("EXPERIMENT CONFIGURATION (AUTO-GENERATED)")
+    print("=" * 70)
+
+    print("\n[EXECUTION]")
+    for k, v in config["EXECUTION"].items():
+        print(f"{k:25}: {v}")
+
+    print("\n[FEATURE EXTRACTION]")
+    for k, v in config["FEATURES"].items():
+        print(f"{k:25}: {v}")
+
+    print("\n[MODELS]")
+    for model, params in config["MODELS"].items():
+        print(f"\n{model}")
+        for k, v in params.items():
+            print(f"  {k:22}: {v}")
+
+    print("\n[DATASET]")
+    for k, v in config["DATASET"].items():
+        print(f"{k:25}: {v}")
+
+    print("\n[EVALUATION METRICS]")
+    for k, v in config["METRICS"].items():
+        print(f"{k:25}: {v}")
+
+    print("=" * 70 + "\n")
+
+
+print_experiment_config(CONFIG)
+
 # -----------------------------------------------------
-# 8. FULL 10-FOLD EVALUATION (AGORA COM RF)
+# 8. FULL 10-FOLD EVALUATION 
 # -----------------------------------------------------
 if RUN_SINGLE_FOLD:
     folds_to_run = [SINGLE_FOLD]
@@ -309,22 +388,33 @@ for model_name, train_fn in model_constructors.items():
 
         X_train, y_train, X_test, y_test = build_fold_dataset(fold)
 
-        # Treino e temporização
         t0 = time.time()
         if model_name == "SVM":
             if TUNE:
-                # model = train_fn(X_train, y_train)  # train_svm
-                
-                model = tune_svm(X_train, y_train, X_test, y_test)  # tuning SVM
+                model, best_params = tune_svm(X_train, y_train, X_test, y_test)
+                svm_params_per_fold.append({
+                    "fold": fold,
+                    "C": best_params[0],
+                    "gamma": best_params[1]
+                })
             else:
-                model = train_fn(X_train, y_train)
-        else:
-            # Para RF, podes ajustar n_estimators se quiseres
+                model = train_svm(X_train, y_train)
+
+        elif model_name == "RandomForest":
             if TUNE:
-                # model = train_fn(X_train, y_train, n_estimators=100)
-                model = tune_rf(X_train, y_train, X_test, y_test)  # tuning RF
+                model, best_params = tune_rf(X_train, y_train, X_test, y_test)
+                rf_params_per_fold.append({
+                    "fold": fold,
+                    "n_estimators": best_params[0],
+                    "max_depth": best_params[1],
+                    "min_samples_split": best_params[2]
+                })
+            else:
+                model = train_random_forest(X_train, y_train)
+
         t1 = time.time()
         train_time = t1 - t0
+
 
         acc, prec, rec, f1, preds, pred_time = evaluate(model, X_test, y_test)
 
@@ -359,6 +449,16 @@ for model_name, train_fn in model_constructors.items():
         "mean_confusion": mean_cm
     }
 
+    if TUNE:
+        df_svm_params = pd.DataFrame(svm_params_per_fold)
+        df_rf_params = pd.DataFrame(rf_params_per_fold)
+
+        df_svm_params.to_csv("svm_best_params_per_fold.csv", index=False)
+        df_rf_params.to_csv("rf_best_params_per_fold.csv", index=False)
+
+        print("\nSaved hyperparameters per fold:")
+        print(" - svm_best_params_per_fold.csv")
+        print(" - rf_best_params_per_fold.csv")
     # salvar resultados do modelo
     df_metrics.to_csv(f"fold_metrics_{model_name}.csv", index=False)
     np.savetxt(f"mean_confusion_matrix_{model_name}.csv", mean_cm, delimiter=",")
