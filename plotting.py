@@ -2,7 +2,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend
 
 def plot_confusion_matrix(
     cm,

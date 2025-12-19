@@ -3,6 +3,8 @@
 RUN_SINGLE_FOLD = False
 SINGLE_FOLD = 1
 TUNE = True
+DATA_AUGMENTED = True
+
 
 CONFIG = {
     "EXECUTION": {
