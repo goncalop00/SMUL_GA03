@@ -36,7 +36,7 @@ CONFIG = {
 
 def print_experiment_config(config):
     print("\n" + "=" * 70)
-    print("EXPERIMENT CONFIGURATION (AUTO-GENERATED)")
+    print("EXPERIMENT CONFIGURATION ")
     print("=" * 70)
 
     for section, values in config.items():

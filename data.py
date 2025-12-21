@@ -13,6 +13,7 @@ from config import DATA_AUGMENTED
 # -----------------------------------------------------
 def load_dataset():
     dataset = soundata.initialize("urbansound8k")
+    dataset.download()
     dataset.validate()
     return dataset
 
