@@ -90,6 +90,11 @@ All experimental outputs are saved in the `results/` folder:
    ```bash
    pip install -r requirements.txt
 
+3. Create the output directory:
+
+   ```bash
+   mkdir results
+
 4. Run:
 
    ```bash
