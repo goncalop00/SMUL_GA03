@@ -6,6 +6,10 @@ The goal of this project is to perform **environmental sound classification** us
 
 ---
 
+## Authors
+* **Gonçalo Pereira**
+* **Pedro Loureiro**
+
 ## Project Overview
 
 Environmental sound classification aims to automatically recognize sound events such as *dog barking, sirens, drilling,* or *engine idling*.  
