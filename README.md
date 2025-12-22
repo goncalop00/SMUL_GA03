@@ -49,7 +49,7 @@ SMUL_GA03/
 - Statistical aggregation using mean and standard deviation
 
 ### Models
-- **Support Vector Machine (SVM)** with RBF kernel
+- **Support Vector Machine (SVM)**
 - **Random Forest Classifier**
 
 ### Hyperparameter Tuning
